@@ -1186,6 +1186,190 @@ class Test(TestCase):
         ''')
 
 
+class TestUnreachableCode(TestCase):
+    """
+    Tests for statements which can never be reached because a previous
+    statement in the same block always exits the block.
+    """
+
+    def test_return(self):
+        self.flakes('''
+        def f():
+            return
+            print('unreachable')
+        ''', m.UnreachableCode)
+
+    def test_raise(self):
+        self.flakes('''
+        def f():
+            raise ValueError()
+            print('unreachable')
+        ''', m.UnreachableCode)
+
+    def test_break_continue(self):
+        self.flakes('''
+        def f():
+            for i in range(10):
+                break
+                print('unreachable')
+        ''', m.UnreachableCode)
+
+        self.flakes('''
+        def f():
+            while True:
+                continue
+                print('unreachable')
+        ''', m.UnreachableCode)
+
+    def test_module_level(self):
+        self.flakes('''
+        raise SystemExit(1)
+        print('unreachable')
+        ''', m.UnreachableCode)
+
+    def test_multiple_unreachable_statements(self):
+        self.flakes('''
+        def f():
+            return
+            a = 1
+            b = 2
+        ''', m.UnreachableCode, m.UnreachableCode, m.UnusedVariable,
+            m.UnusedVariable)
+
+    def test_position(self):
+        w = self.flakes('''
+        def f():
+            return
+            print('unreachable')
+        ''', m.UnreachableCode)
+        self.assertEqual(w.messages[0].lineno, 4)
+        self.assertEqual(w.messages[0].col, 4)
+
+    def test_branches_are_independent(self):
+        # a `return` in one branch does not affect the other branch
+        self.flakes('''
+        def f(x):
+            if x:
+                return
+            print('reachable')
+        ''')
+
+        self.flakes('''
+        def f(x):
+            if x:
+                return
+                print('unreachable')
+            else:
+                print('reachable')
+        ''', m.UnreachableCode)
+
+    def test_if_else_both_exit(self):
+        self.flakes('''
+        def f(x):
+            if x > 0:
+                return "pos"
+            else:
+                return "neg"
+            print('unreachable')
+        ''', m.UnreachableCode)
+
+        self.flakes('''
+        def f(x):
+            if x == 1:
+                raise ValueError()
+            elif x == 2:
+                return
+            else:
+                return
+            print('unreachable')
+        ''', m.UnreachableCode)
+
+    def test_try_except_else_finally(self):
+        self.flakes('''
+        def f():
+            try:
+                return
+                print('unreachable')
+            except ValueError:
+                raise
+                print('unreachable')
+            else:
+                print('reachable')
+            finally:
+                print('reachable')
+        ''', m.UnreachableCode, m.UnreachableCode)
+
+    def test_with(self):
+        self.flakes('''
+        def f():
+            with open('/dev/null'):
+                return
+                print('unreachable')
+        ''', m.UnreachableCode)
+
+    def test_loop_else(self):
+        self.flakes('''
+        def f():
+            for i in range(10):
+                pass
+            else:
+                return
+                print('unreachable')
+        ''', m.UnreachableCode)
+
+    def test_class_body(self):
+        self.flakes('''
+        class A:
+            raise ValueError()
+            x = 1
+        ''', m.UnreachableCode)
+
+    def test_type_checking_and_if_false_ignored(self):
+        self.flakes('''
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            x = 1
+            raise ValueError()
+            y = 2
+        ''')
+
+        self.flakes('''
+        import typing
+        if typing.TYPE_CHECKING:
+            raise ValueError()
+            x = 1
+        ''')
+
+        self.flakes('''
+        if False:
+            raise ValueError()
+            x = 1
+        ''')
+
+    def test_yield_does_not_terminate(self):
+        self.flakes('''
+        def f():
+            yield 1
+            print('reachable')
+        ''')
+
+    def test_pass_does_not_terminate(self):
+        self.flakes('''
+        def f():
+            pass
+            print('reachable')
+        ''')
+
+    def test_nested_function_not_affected(self):
+        self.flakes('''
+        def f():
+            def g():
+                return
+                print('unreachable')
+            print('reachable')
+        ''', m.UnreachableCode)
+
+
 class TestUnusedAssignment(TestCase):
     """
     Tests for warning about unused assignments.

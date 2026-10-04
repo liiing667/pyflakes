@@ -81,6 +81,51 @@ def _is_name_or_attr(node, name):  # type: (ast.AST, str) -> bool
     )
 
 
+def _is_dead_branch_if(node):
+    """
+    Whether `node` is an `if` statement whose body is never executed at
+    runtime (`if TYPE_CHECKING:` or `if False:`).
+    """
+    return (
+        isinstance(node, ast.If) and
+        (
+            _is_name_or_attr(node.test, 'TYPE_CHECKING') or
+            (isinstance(node.test, ast.Constant) and node.test.value is False)
+        )
+    )
+
+
+_TERMINATING_STATEMENTS = (
+    ast.Return, ast.Raise, ast.Break, ast.Continue,
+)
+
+
+def _stmt_exits(stmt):
+    """
+    Whether `stmt` itself prevents control flow from reaching the next
+    statement in its block.
+    """
+    return (
+        isinstance(stmt, _TERMINATING_STATEMENTS) or
+        (
+            isinstance(stmt, ast.If) and
+            stmt.orelse and
+            _stmt_list_exits(stmt.body) and
+            _stmt_list_exits(stmt.orelse)
+        )
+    )
+
+
+def _stmt_list_exits(stmts):
+    """
+    Whether the block consisting of `stmts` cannot fall through to its end.
+    Only direct block terminators and `if` statements whose body and `else`
+    branch both terminate are considered; branches are otherwise analyzed
+    independently.
+    """
+    return any(_stmt_exits(stmt) for stmt in stmts)
+
+
 MAPPING_KEY_RE = re.compile(r'\(([^()]*)\)')
 CONVERSION_FLAG_RE = re.compile('[#0+ -]*')
 WIDTH_RE = re.compile(r'(?:\*|\d*)')
@@ -1198,8 +1243,36 @@ class Checker:
         )
 
     def handleChildren(self, tree, omit=None):
-        for node in iter_child_nodes(tree, omit=omit):
-            self.handleNode(node, tree)
+        for name in tree.__class__._fields:
+            if omit and name in omit:
+                continue
+            field = getattr(tree, name, None)
+            if isinstance(field, ast.AST):
+                self.handleNode(field, tree)
+            elif isinstance(field, list):
+                if (
+                        name in ('body', 'orelse', 'finalbody') and
+                        not (name == 'body' and _is_dead_branch_if(tree))
+                ):
+                    self.handleStmtList(field, tree)
+                else:
+                    for item in field:
+                        if isinstance(item, ast.AST):
+                            self.handleNode(item, tree)
+
+    def handleStmtList(self, stmts, parent):
+        """
+        Handle a list of statements which form a single block, reporting
+        statements that follow an unconditional block terminator (return,
+        raise, break, continue).
+        """
+        terminated = False
+        for stmt in stmts:
+            self.handleNode(stmt, parent)
+            if terminated:
+                self.report(messages.UnreachableCode, stmt)
+            elif _stmt_exits(stmt):
+                terminated = True
 
     def isLiteralTupleUnpacking(self, node):
         if isinstance(node, ast.Assign):
@@ -2045,8 +2118,7 @@ class Checker:
                         not self._in_doctest() and
                         not isinstance(self.scope, FunctionScope)):
                     self.deferFunction(lambda: self.handleDoctests(node))
-                for stmt in node.body:
-                    self.handleNode(stmt, node)
+                self.handleStmtList(node.body, node)
 
         self.addBinding(node, ClassDefinition(node.name, node))
 
@@ -2189,8 +2261,7 @@ class Checker:
                 self.report(messages.DefaultExceptNotLast, handler)
         # Memorize the except handlers and process the body
         self.exceptHandlers.append(handler_names)
-        for child in node.body:
-            self.handleNode(child, node)
+        self.handleStmtList(node.body, node)
         self.exceptHandlers.pop()
         # Process the other nodes: "except:", "else:", "finally:"
         self.handleChildren(node, omit='body')

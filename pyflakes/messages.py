@@ -206,6 +206,14 @@ class BreakOutsideLoop(Message):
     message = '\'break\' outside loop'
 
 
+class UnreachableCode(Message):
+    """
+    Indicates code that can never be executed because a previous statement
+    in the same block always exits the block (return, raise, break, continue).
+    """
+    message = 'unreachable code'
+
+
 class DefaultExceptNotLast(Message):
     """
     Indicates an except: block as not the last exception handler.
