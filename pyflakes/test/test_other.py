@@ -2187,3 +2187,191 @@ class TestIncompatiblePrintOperator(TestCase):
         from __future__ import print_function
         if print: pass
         ''')
+
+    def test_unreachable_after_return(self):
+        self.flakes('''
+        def f(x):
+            if x > 0:
+                return "pos"
+            else:
+                return "neg"
+            print("unreachable")
+        ''', m.UnreachableCode)
+
+    def test_unreachable_after_raise(self):
+        self.flakes('''
+        def f():
+            raise ValueError
+            print("unreachable")
+        ''', m.UnreachableCode)
+
+    def test_unreachable_after_break_and_continue(self):
+        self.flakes('''
+        def f(xs):
+            for x in xs:
+                break
+                print("unreachable")
+            while xs:
+                continue
+                print("unreachable")
+        ''', m.UnreachableCode, m.UnreachableCode)
+
+    def test_unreachable_reports_position(self):
+        w = self.flakes('''
+        def f():
+            return 1
+            print("unreachable")
+        ''', m.UnreachableCode)
+        [message] = w.messages
+        self.assertEqual(message.lineno, 4)
+        self.assertEqual(message.col, 4)
+
+    def test_unreachable_branch_independent(self):
+        """
+        A return in one branch of an if does not affect statements in other
+        branches or following the if.
+        """
+        self.flakes('''
+        def f(x):
+            if x:
+                return 1
+            print("reachable")
+        ''')
+        self.flakes('''
+        def f(x):
+            if x:
+                return 1
+            else:
+                print("reachable")
+        ''')
+
+    def test_unreachable_all_branches_terminate(self):
+        self.flakes('''
+        def f(x):
+            if x:
+                return 1
+            else:
+                raise ValueError
+            print("unreachable")
+        ''', m.UnreachableCode)
+
+    def test_unreachable_try_except(self):
+        """
+        A return in an except handler only affects that handler's block.
+        """
+        self.flakes('''
+        def f():
+            try:
+                f()
+            except Exception:
+                return 1
+            print("reachable")
+        ''')
+        self.flakes('''
+        def f():
+            try:
+                f()
+            except Exception:
+                return 1
+                print("unreachable")
+        ''', m.UnreachableCode)
+
+    def test_unreachable_try_except_conservative(self):
+        """
+        pyflakes does not reason about whether a handler actually catches the
+        exception, so a try/except never terminates the enclosing block.
+        """
+        self.flakes('''
+        def f():
+            try:
+                return 1
+            except Exception:
+                raise
+            print("treated as reachable")
+        ''')
+
+    def test_unreachable_try_else_may_run(self):
+        self.flakes('''
+        def f():
+            try:
+                return 1
+            except Exception:
+                raise
+            else:
+                pass
+            print("reachable")
+        ''')
+
+    def test_unreachable_try_finally(self):
+        self.flakes('''
+        def f():
+            try:
+                f()
+            finally:
+                return 1
+            print("unreachable")
+        ''', m.UnreachableCode)
+
+    def test_unreachable_with_body(self):
+        self.flakes('''
+        def f():
+            with open("f") as fh:
+                return fh.read()
+                print("unreachable")
+        ''', m.UnreachableCode)
+
+    def test_unreachable_module_level(self):
+        self.flakes('''
+        raise SystemExit
+        x = 1
+        ''', m.UnreachableCode)
+
+    def test_unreachable_type_checking(self):
+        self.flakes('''
+        from typing import TYPE_CHECKING
+        if TYPE_CHECKING:
+            import os
+            os.getcwd()
+        ''')
+
+    def test_unreachable_if_false(self):
+        self.flakes('''
+        if False:
+            raise ValueError
+            print("not reported")
+        ''')
+
+    def test_unreachable_if_false_else_is_live(self):
+        self.flakes('''
+        if False:
+            pass
+        else:
+            raise ValueError
+            print("unreachable")
+        ''', m.UnreachableCode)
+
+    def test_yield_does_not_terminate(self):
+        self.flakes('''
+        def f():
+            yield 1
+            print("reachable")
+        ''')
+
+    def test_pass_does_not_terminate(self):
+        self.flakes('''
+        def f():
+            pass
+            print("reachable")
+        ''')
+
+    def test_unreachable_nested_function_body(self):
+        """
+        A nested function body is its own block: it is not unreachable just
+        because the (unreachable) def statement is.
+        """
+        self.flakes('''
+        def f():
+            return 1
+            def g():
+                print("reachable")
+        ''', m.UnreachableCode)

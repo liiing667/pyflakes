@@ -681,6 +681,77 @@ def is_typing_overload(value, scope_stack):
     )
 
 
+_TRY_TYPES = (ast.Try,) + (
+    (ast.TryStar,) if hasattr(ast, 'TryStar') else ()
+)
+
+_TERMINATING_NODES = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+
+
+def _is_type_checking_test(node, scope_stack):
+    return (
+        (isinstance(node, ast.Name) and node.id == 'TYPE_CHECKING') or
+        _is_typing(node, 'TYPE_CHECKING', scope_stack)
+    )
+
+
+def _is_dead_if_test(node, scope_stack):
+    return (
+        (isinstance(node, ast.Constant) and node.value is False) or
+        _is_type_checking_test(node, scope_stack)
+    )
+
+
+def _suite_terminates(stmts, scope_stack):
+    return any(_stmt_terminates(stmt, scope_stack) for stmt in stmts)
+
+
+def _stmt_terminates(stmt, scope_stack):
+    """
+    Whether ``stmt`` always transfers control out of the block containing it.
+    """
+    if isinstance(stmt, _TERMINATING_NODES):
+        return True
+    if isinstance(stmt, ast.If):
+        if _is_dead_if_test(stmt.test, scope_stack):
+            return _suite_terminates(stmt.orelse, scope_stack)
+        return (
+            bool(stmt.orelse) and
+            _suite_terminates(stmt.body, scope_stack) and
+            _suite_terminates(stmt.orelse, scope_stack)
+        )
+    if isinstance(stmt, _TRY_TYPES):
+        if stmt.handlers:
+            # Be conservative: pyflakes does not reason about whether an
+            # exception raised in the try body is actually caught by one of
+            # the handlers, so a try/except never makes the rest of the
+            # enclosing block unreachable.
+            return False
+        return (
+            _suite_terminates(stmt.body, scope_stack) or
+            _suite_terminates(stmt.finalbody, scope_stack)
+        )
+    return False
+
+
+def _iter_child_suites(node):
+    if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                         ast.ClassDef, ast.With, ast.AsyncWith)):
+        yield node.body
+    elif isinstance(node, (ast.If, ast.While, ast.For, ast.AsyncFor)):
+        yield node.body
+        yield node.orelse
+    elif isinstance(node, _TRY_TYPES):
+        yield node.body
+        yield node.orelse
+        yield node.finalbody
+        for handler in node.handlers:
+            yield handler.body
+    elif isinstance(node, ast.Match):
+        for case in node.cases:
+            yield case.body
+
+
 class AnnotationState:
     NONE = 0
     STRING = 1
@@ -744,6 +815,7 @@ class Checker:
             for builtin in self.builtIns:
                 self.addBinding(None, Builtin(builtin))
             self.handleChildren(tree)
+            self._check_unreachable(tree)
             self._run_deferred()
 
         self.checkDeadScopes()
@@ -882,6 +954,25 @@ class Checker:
 
     def report(self, messageClass, *args, **kwargs):
         self.messages.append(messageClass(self.filename, *args, **kwargs))
+
+    def _check_unreachable(self, node):
+        dead_if_body = (
+            isinstance(node, ast.If) and
+            _is_dead_if_test(node.test, self.scopeStack)
+        )
+        for suite in _iter_child_suites(node):
+            if dead_if_body and suite is node.body:
+                continue
+            terminated = False
+            for stmt in suite:
+                if terminated:
+                    self.report(messages.UnreachableCode, stmt)
+                elif _stmt_terminates(stmt, self.scopeStack):
+                    terminated = True
+        for child in ast.iter_child_nodes(node):
+            if dead_if_body and any(child is stmt for stmt in node.body):
+                continue
+            self._check_unreachable(child)
 
     def getParent(self, node):
         # Lookup the first parent which is not Tuple, List or Starred
